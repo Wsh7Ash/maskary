@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unit tests
+        run: npm test
+      - name: Inline module is in sync with src/
+        run: node tools/sync-inline.mjs --check
+      - name: Results artifacts are current
+        run: |
+          node tools/generate-results.mjs
+          git diff --exit-code results/
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: file:// boot + UI smoke (headless Chrome and Firefox)
+        run: node tools/browser-smoke.mjs

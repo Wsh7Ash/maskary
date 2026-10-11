@@ -1,0 +1,23 @@
+Support ticket #4821 — synthetic demo data only
+(domains from RFC 2606, phone numbers use the 555/20 7123 ranges)
+
+Customer contact: john.doe+support@example.com
+Alternate contact: alice.smith@example.org
+Preferred callback: +44 20 7123 4567 (US line: (555) 123-4567)
+
+Invoice was charged to card 4111 1111 1111 1111.
+Refund destination IBAN: GB82 WEST 1234 5698 7654 32
+
+Gateway log excerpt:
+  client_ip=192.168.10.42 edge_node=2001:db8::1
+  POST https://user:pass@gateway.example.com/v1/payments?token=abc123secret456
+  auth=ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8
+  aws_id=AKIA1234567890ABCDEF
+
+Second message from john.doe+support@example.com asked us to also notify
+alice.smith@example.org. Ticket still references john.doe+support@example.com
+in the final note. Project Bluebird stays in the text unless a custom term
+list mentions it.
+
+Nothing else in this paragraph is sensitive: the year 2026, zip 90210,
+version 1.2.3.4.5 and order id 1234567 must all survive redaction untouched.

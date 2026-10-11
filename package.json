@@ -1,0 +1,17 @@
+{
+  "name": "maskary",
+  "version": "0.1.0",
+  "description": "Local, offline redaction workbench — strip emails, phones, IPs, cards, IBANs, tokens and custom terms from text or JSON, right in your browser.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "sync": "node tools/sync-inline.mjs",
+    "results": "node tools/generate-results.mjs",
+    "smoke": "node tools/browser-smoke.mjs"
+  }
+}

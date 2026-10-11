@@ -1,0 +1,29 @@
+{
+  "ticket": {
+    "id": 4821,
+    "open": true,
+    "contact": "EMAIL_1",
+    "phone": "PHONE_1",
+    "notes": [
+      "charged card •••• 1111",
+      "no issues otherwise"
+    ],
+    "devices": [
+      {
+        "ip": "IPV4_1",
+        "label": "cash-register-01"
+      },
+      {
+        "ip": "IPV6_1",
+        "label": "edge-gateway"
+      }
+    ]
+  },
+  "api": {
+    "token": "***",
+    "endpoint": "https://gateway.example.com/v1",
+    "retries": 3,
+    "enabled": true,
+    "flags": null
+  }
+}

@@ -1,0 +1,11 @@
+# Dependencies / build
+node_modules/
+
+# Regenerable artifacts are COMMITTED on purpose (results/ proves the real
+# pipeline ran); only runtime droppings are ignored:
+*.log
+.DS_Store
+Thumbs.db
+
+# Local scratch
+tools/_*.mjs

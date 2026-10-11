@@ -1,0 +1,23 @@
+Support ticket #4821 — synthetic demo data only
+(domains from RFC 2606, phone numbers use the 555/20 7123 ranges)
+
+Customer contact: EMAIL_1
+Alternate contact: EMAIL_2
+Preferred callback: PHONE_1 (US line: PHONE_2)
+
+Invoice was charged to card •••• 1111.
+Refund destination IBAN: •••• 5432
+
+Gateway log excerpt:
+  client_ip=IPV4_1 edge_node=IPV6_1
+  POST ***
+  auth=***
+  aws_id=***
+
+Second message from EMAIL_1 asked us to also notify
+EMAIL_2. Ticket still references EMAIL_1
+in the final note. Project Bluebird stays in the text unless a custom term
+list mentions it.
+
+Nothing else in this paragraph is sensitive: the year 2026, zip 90210,
+version 1.2.3.4.5 and order id 1234567 must all survive redaction untouched.

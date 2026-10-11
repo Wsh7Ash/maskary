@@ -1,0 +1,5 @@
+id,name,email,phone,amount,notes
+1,John Doe,john.doe@example.com,(555) 123-4567,42.50,refund approved
+2,Alice Smith,alice.smith@example.org,+44 20 7123 4567,19.99,awaiting callback
+3,Bob Jones,bob.jones@example.net,555-123-4567,105.00,card on file 4111 1111 1111 1111
+4,John Doe,john.doe@example.com,(555) 123-4567,7.25,second order same customer

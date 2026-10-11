@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="en" data-ready="0">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'" />
+<title>maskary — local redaction workbench</title>
+<link rel="stylesheet" href="styles.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23111'/%3E%3Crect x='3' y='7' width='10' height='2.5' fill='%23eab308'/%3E%3C/svg%3E" />
+</head>
+<body>
+<header class="app-header">
+  <h1>maskary</h1>
+  <p class="tagline">local redaction workbench — paste, pick a policy, copy clean output</p>
+  <p class="trust">runs entirely in this tab · zero network requests · nothing is uploaded</p>
+</header>
+
+<main class="app">
+  <div class="col col-left">
+    <section class="pane" aria-labelledby="input-heading">
+      <div class="pane-head">
+        <h2 id="input-heading">Input</h2>
+        <span id="file-name" class="file-name"></span>
+      </div>
+      <div class="toolbar">
+        <button id="btn-file" class="btn" type="button" onclick="document.getElementById('file-input').click()">Load file…</button>
+        <button id="btn-sample" class="btn" type="button">Load sample</button>
+        <button id="btn-clear" class="btn btn-ghost" type="button">Clear</button>
+        <input id="file-input" type="file" accept=".txt,.csv,.json,.log,text/*" hidden />
+      </div>
+      <div id="drop-zone" class="drop-zone">
+        <textarea id="input" spellcheck="false" placeholder="Paste text, CSV, or JSON here — or drop a file on this box.&#10;&#10;Nothing leaves your machine: redaction runs in this tab."></textarea>
+      </div>
+      <div class="field">
+        <label for="custom-terms">Custom terms <span class="muted">(comma or newline separated — masked wherever they appear)</span></label>
+        <textarea id="custom-terms" rows="2" spellcheck="false" placeholder="Project Bluebird, Acme Corp"></textarea>
+      </div>
+      <p id="mode-note" class="mode-note">Mode: waiting for input</p>
+    </section>
+
+    <section class="pane" aria-labelledby="policy-heading">
+      <div class="pane-head"><h2 id="policy-heading">Policies</h2></div>
+      <div id="policy-list" class="policy-list"></div>
+      <p class="muted small">Policies apply per detector type. Same value always gets the same alias.</p>
+    </section>
+  </div>
+
+  <div class="col col-right">
+    <section class="pane" aria-labelledby="preview-heading">
+      <div class="pane-head"><h2 id="preview-heading">Preview</h2></div>
+      <div id="counts" class="counts" aria-live="polite"></div>
+      <div class="view-toggle" role="radiogroup" aria-label="Preview mode">
+        <label><input type="radio" name="view" value="highlight" checked /> Highlight</label>
+        <label><input type="radio" name="view" value="diff" /> Diff</label>
+      </div>
+      <div id="preview" class="preview" tabindex="0"></div>
+    </section>
+
+    <section class="pane" aria-labelledby="export-heading">
+      <div class="pane-head"><h2 id="export-heading">Export</h2></div>
+      <div class="toolbar">
+        <button id="btn-copy" class="btn btn-primary" type="button" disabled>Copy redacted</button>
+        <button id="btn-txt" class="btn" type="button" disabled>Download .txt</button>
+        <button id="btn-json" class="btn" type="button" disabled>Download .json</button>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <p class="muted small">
+        Highlight marks show the replacement; hover a mark to see the original.
+        Diff lists every value → replacement pair. JSON input is walked structurally
+        (keys kept, values redacted) and re-formatted with 2-space indent.
+      </p>
+    </section>
+  </div>
+</main>
+
+<footer class="app-footer">
+  <p class="muted small">
+    maskary is an open-source local tool. Synthetic examples only (RFC 2606 domains, 555 numbers).
+    It is a privacy tool, not a security boundary — review output before sharing.
+  </p>
+</footer>
+
+<noscript><p class="noscript">maskary needs JavaScript. The page is fully offline — enable JavaScript for this file only.</p></noscript>
+
+<!--INLINE-MODULE:START-->
+<script type="module">
+/* Synced from src/*.js by tools/sync-inline.mjs — edit src/, then run:
+   node tools/sync-inline.mjs
+   (inline module because Chrome/Firefox block external module scripts on file://) */
+
+// ==== src/luhn.js ====
+// Pure Luhn (mod-10) helpers for credit-card style numbers. No DOM, no I/O.
+
+// Strip everything that is not a decimal digit.
+function normalizeDigits(value) {
+  return String(value).replace(/[^0-9]/g, '');
+}
+
+// Standard Luhn checksum over the digit string.
+// Returns false for empty input. Length bounds (13-19 for PANs) are the
+// detector's job, not this function's — this is pure arithmetic.
+function isValidLuhn(value) {
+  const digits = normalizeDigits(value);
+  if (digits.length === 0) return false;
+  let sum = 0;
+  let double = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48;
+    if (double) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+// True when the value is a 13-19 digit number that passes Luhn.
+function isValidCardNumber(value) {
+  const digits = normalizeDigits(value);
+  if (digits.length < 13 || digits.length > 19) return false;
+  return isValidLuhn(digits);
+}
+
+// ==== src/iban.js ====
+// Pure IBAN (ISO 13616) helpers: normalization, mod-97 validation, grouping.
+// No DOM, no I/O.
+
+// Uppercase and remove the presentation spaces/dashes people paste with.
+function normalizeIban(value) {
+  return String(value).replace(/[\s-]/g, '').toUpperCase();
+}
+
+// Validate per ISO 13616: country+check (4 chars), total length 15-34,
+// then the mod-97-of-10 check on the "move first 4 to the end" transform
+// with letters expanded to numbers (A=10 ... Z=35).
+function isValidIban(value) {
+  const iban = normalizeIban(value);
+  if (!/^[A-Z]{2}[0-9]{2}[A-Z0-9]+$/.test(iban)) return false;
+  if (iban.length < 15 || iban.length > 34) return false;
+  const rearranged = iban.slice(4) + iban.slice(0, 4);
+  let remainder = 0;
+  for (const ch of rearranged) {
+    const code = ch.charCodeAt(0);
+    if (code >= 48 && code <= 57) {
+      remainder = (remainder * 10 + (code - 48)) % 97;
+    } else if (code >= 65 && code <= 90) {
+      const n = code - 55; // A -> 10 ... Z -> 35 (two decimal digits)
+      remainder = (remainder * 10 + Math.floor(n / 10)) % 97;
+      remainder = (remainder * 10 + (n % 10)) % 97;
+    } else {
+      return false;
+    }
+  }
+  return remainder === 1;
+}
+
+// ISO presentation format: groups of four separated by single spaces.
+function formatIban(value) {
+  const iban = normalizeIban(value);
+  return iban.replace(/(.{4})/g, '$1 ').trim();
+}
+
+// ==== src/aliases.js ====
+// Pure stable alias allocator.
+//
+// Contract:
+//   * the exact same source value always maps to the same alias
+//   * aliases are allocated in first-seen order (per type: EMAIL_1, EMAIL_2, ...)
+//   * allocation is deterministic, so re-running on the same input yields
+//     identical aliases
+//
+// No DOM, no I/O.
+
+const TYPE_LABELS = {
+  email: 'EMAIL',
+  phone: 'PHONE',
+  ipv4: 'IPV4',
+  ipv6: 'IPV6',
+  credit_card: 'CARD',
+  iban: 'IBAN',
+  url_cred: 'URL',
+  token: 'TOKEN',
+  custom: 'CUSTOM',
+};
+
+function labelForType(type) {
+  return TYPE_LABELS[type] ?? String(type).toUpperCase();
+}
+
+// Returns an allocator object:
+//   aliasFor(type, value) -> 'EMAIL_1' (stable per value)
+//   entries()             -> [[value, alias], ...] in allocation order
+//   size                  -> number of distinct values allocated
+function createAliasAllocator() {
+  const byValue = new Map();
+  const counters = new Map();
+  return {
+    aliasFor(type, value) {
+      const existing = byValue.get(value);
+      if (existing !== undefined) return existing;
+      const label = labelForType(type);
+      const next = (counters.get(label) ?? 0) + 1;
+      counters.set(label, next);
+      const alias = `${label}_${next}`;
+      byValue.set(value, alias);
+      return alias;
+    },
+    entries() {
+      return [...byValue.entries()];
+    },
+    get size() {
+      return byValue.size;
+    },
+  };
+}
+
+// ==== src/policies.js ====
+// Pure replacement policies: given a match, produce the replacement string.
+// No DOM, no I/O.
+
+const POLICIES = ['alias', 'mask_all', 'keep_last4', 'keep_domain'];
+
+// Default policy per detector type. `alias` preserves readability with stable
+// placeholders; masks favour privacy.
+const DEFAULT_POLICIES = {
+  email: 'alias',
+  phone: 'alias',
+  ipv4: 'alias',
+  ipv6: 'alias',
+  credit_card: 'keep_last4',
+  iban: 'keep_last4',
+  url_cred: 'mask_all',
+  token: 'mask_all',
+  custom: 'mask_all',
+};
+
+// Apply a policy to one match.
+//
+//   alias       -> the allocated alias, e.g. 'EMAIL_1'
+//   mask_all    -> '***'
+//   keep_last4  -> '•••• 4242' — last 4 characters of the value after
+//                  removing spaces and dashes
+//   keep_domain -> 'j***@example.com' — first character of the local part,
+//                  then '***', then '@' + domain. Falls back to '***' when
+//                  the value has no '@'.
+//
+// Throws on an unknown policy name (caller/UI only offers POLICIES).
+function applyPolicy(policy, type, value, alias) {
+  switch (policy) {
+    case 'alias': {
+      if (typeof alias !== 'string' || alias.length === 0) {
+        throw new Error("policy 'alias' requires an allocated alias");
+      }
+      return alias;
+    }
+    case 'mask_all':
+      return '***';
+    case 'keep_last4': {
+      const cleaned = String(value).replace(/[\s-]/g, '');
+      const tail = cleaned.slice(-4);
+      return tail ? `•••• ${tail}` : '***';
+    }
+    case 'keep_domain': {
+      const s = String(value);
+      const at = s.lastIndexOf('@');
+      if (at > 0 && at < s.length - 1) {
+        return `${s[0]}***@${s.slice(at + 1)}`;
+      }
+      return '***';
+    }
+    default:
+      throw new RangeError(`unknown policy: ${policy}`);
+  }
+}
+
+// ==== src/detectors.js ====
+// Pure detector engine: regexes + validators -> typed match ranges.
+// No DOM, no I/O, no state. Every detector returns
+//   [{ start, end, value }]
+// and `detect()` adds the `type` field: email | phone | ipv4 | ipv6 |
+// credit_card | iban | url_cred | token | custom.
+//
+// Detection is regex-based and deliberately conservative: a value is only
+// reported when the surrounding shape and, where applicable, a checksum
+// (Luhn / IBAN mod-97) confirm it.
+
+
+const DETECTOR_TYPES = ['email', 'phone', 'ipv4', 'ipv6', 'credit_card', 'iban', 'url_cred', 'token', 'custom'];
+
+// --- helpers ----------------------------------------------------------------
+
+function scan(text, regex) {
+  const out = [];
+  for (const m of text.matchAll(regex)) {
+    out.push({ start: m.index, end: m.index + m[0].length, value: m[0] });
+  }
+  return out;
+}
+
+function escRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function digitCount(s) {
+  let n = 0;
+  for (const ch of s) if (ch >= '0' && ch <= '9') n++;
+  return n;
+}
+
+function dedupeRanges(list) {
+  const seen = new Set();
+  const out = [];
+  for (const m of list) {
+    const key = `${m.start}:${m.end}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(m);
+    }
+  }
+  return out;
+}
+
+// --- email ------------------------------------------------------------------
+// RFC-ish: dot-atom local part (supports plus-addressing), domain with at
+// least one dot, final label must contain a letter. Trailing sentence period
+// is not consumed ("mail a@example.com." still matches).
+const EMAIL_RE = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9_%+-]+(?:\.[A-Za-z0-9_%+-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+(?![A-Za-z0-9_%+-]|\.[A-Za-z0-9])/g;
+
+function detectEmails(text) {
+  const out = [];
+  for (const m of scan(text, EMAIL_RE)) {
+    const domain = m.value.slice(m.value.lastIndexOf('@') + 1);
+    const lastLabel = domain.slice(domain.lastIndexOf('.') + 1);
+    if (!/[A-Za-z]/.test(lastLabel)) continue; // reject example.123
+    out.push(m);
+  }
+  return out;
+}
+
+// --- phone ------------------------------------------------------------------
+// Accepted shapes (>= 7 and <= 15 digits after cleanup):
+//   +CC ...      international, separators space/dot/dash
+//   (555) 123-4567, (555)123-4567
+//   555-123-4567, 555.123.4567
+//   555 123 4567
+// Bare digit runs without separators are NOT treated as phones (a year such
+// as 2026 or a 5-digit zip must never match).
+const PHONE_PATTERNS = [
+  /(?<![A-Za-z0-9.+-])\+[0-9]{1,3}(?:[ .-]?[0-9]){4,12}(?![0-9])/g,
+  /(?<![0-9])\([0-9]{3}\)[0-9 .-]{0,2}[0-9]{3}[ .-][0-9]{4}(?![0-9])/g,
+  /(?<![0-9.])[0-9]{3}[-.][0-9]{3}[-.][0-9]{4}(?![0-9])/g,
+  /(?<![0-9])[0-9]{3} [0-9]{3} [0-9]{4}(?![0-9])/g,
+];
+
+function detectPhones(text) {
+  const out = [];
+  for (const re of PHONE_PATTERNS) {
+    for (const m of scan(text, re)) {
+      const digits = digitCount(m.value);
+      if (digits < 7 || digits > 15) continue;
+      out.push(m);
+    }
+  }
+  return dedupeRanges(out);
+}
+
+// --- ipv4 -------------------------------------------------------------------
+// Octet ranges enforced inside the regex (0-255). Leading zeros tolerated
+// (010.0.0.1 matches, documented) via the optional leading zero branch.
+// Boundaries reject partial matches: 999.1.1.1 and 1.2.3.4.5 produce no
+// match at all.
+const IPV4_OCTET = '(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|0?[0-9]{1,2})';
+const IPV4_RE = new RegExp(`(?<![0-9.])${IPV4_OCTET}(?:\\.${IPV4_OCTET}){3}(?![0-9.])`, 'g');
+
+function detectIPv4(text) {
+  return scan(text, IPV4_RE);
+}
+
+// --- ipv6 -------------------------------------------------------------------
+// Basic full and compressed forms (::1, 2001:db8::1, full 8-group). A
+// candidate immediately followed by "." + digit (as in ::ffff:1.2.3.4) is
+// rejected so we never mangle an embedded IPv4; the ipv4 detector then
+// handles that tail instead.
+const IPV6_RE = new RegExp('(?<![0-9A-Fa-f:.])(?:' + '(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|' + '(?:[0-9A-Fa-f]{1,4}:){1,7}:|' + '(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|' + '(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}|' + '(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}|' + '(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}|' + '(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}|' + '[0-9A-Fa-f]{1,4}:(?::[0-9A-Fa-f]{1,4}){1,6}|' + ':(?::[0-9A-Fa-f]{1,4}){1,7}|' + '::' + ')(?![0-9A-Fa-f:])', 'g');
+
+function detectIPv6(text) {
+  const out = [];
+  for (const m of scan(text, IPV6_RE)) {
+    const next = text[m.end];
+    const after = text[m.end + 1];
+    if (next === '.' && after >= '0' && after <= '9') continue; // IPv4 tail
+    out.push(m);
+  }
+  return out;
+}
+
+// --- credit card ------------------------------------------------------------
+// 13-19 digits with single spaces/dashes between them, Luhn validated.
+// Boundaries keep longer digit runs from being matched partially.
+const CARD_RE = /(?<!\d)(?<!\d[ -])(?:\d[ -]?){12,18}\d(?![ -]?\d)/g;
+
+function detectCreditCards(text) {
+  const out = [];
+  for (const m of scan(text, CARD_RE)) {
+    const digits = normalizeDigits(m.value);
+    if (digits.length < 13 || digits.length > 19) continue;
+    if (!isValidLuhn(digits)) continue;
+    out.push(m);
+  }
+  return out;
+}
+
+// --- iban -------------------------------------------------------------------
+// Contiguous or space-grouped (ISO presentation). Check digits validated
+// with mod-97, which removes essentially all false positives.
+const IBAN_CONTIGUOUS_RE = /(?<![A-Za-z0-9])[A-Za-z]{2}[0-9]{2}[A-Za-z0-9]{11,30}(?![A-Za-z0-9])/g;
+const IBAN_SPACED_RE = /(?<![A-Za-z0-9])[A-Za-z]{2}[0-9]{2}(?: [A-Za-z0-9]{4}){2,} ?[A-Za-z0-9]{1,4}(?![A-Za-z0-9])/g;
+
+function detectIbans(text) {
+  const out = [];
+  for (const re of [IBAN_CONTIGUOUS_RE, IBAN_SPACED_RE]) {
+    for (const m of scan(text, re)) {
+      if (!isValidIban(m.value)) continue;
+      out.push(m);
+    }
+  }
+  return dedupeRanges(out);
+}
+
+// --- urls with credentials --------------------------------------------------
+// Any http(s)/ftp(s)/ws(s) URL whose authority carries user:pass@, or whose
+// query string carries a secret-looking parameter. The whole URL is the match.
+const URL_RE = /(?:https?|ftps?|wss?):\/\/[^\s<>"']+/gi;
+const URL_CRED_RE = /\/\/[^/@\s]+:[^/@\s]+@/;
+const URL_PARAM_RE = /[?&](?:access_token|token|api_key|apikey|key|secret|client_secret|password|passwd|pwd|auth)=[^&#\s"']+/i;
+
+function detectUrlsWithCredentials(text) {
+  const out = [];
+  for (const m of scan(text, URL_RE)) {
+    // Trim trailing sentence punctuation that is not part of the URL.
+    const trimmed = m.value.replace(/[.,;:!?)\]}]+$/, '');
+    const url = trimmed;
+    if (URL_CRED_RE.test(url) || URL_PARAM_RE.test(url)) {
+      out.push({ start: m.start, end: m.start + url.length, value: url });
+    }
+  }
+  return out;
+}
+
+// --- tokens -----------------------------------------------------------------
+// Known provider prefixes first, then a generic high-entropy fallback.
+// The fallback only fires for >= 40 contiguous chars of the token charset
+// that mix lower + upper + digit + one of _ + / = . (or look like a JWT),
+// which keeps ordinary English prose (spaces everywhere) at zero matches.
+const TOKEN_PATTERNS = [
+  /(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])/g,
+  /(?<![A-Za-z0-9])ghp_[A-Za-z0-9]{36}(?![A-Za-z0-9])/g,
+  /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/g,
+  /(?<![A-Za-z0-9])xox[baprs]-[0-9A-Za-z]{10,}(?![A-Za-z0-9])/g,
+  /(?<![A-Za-z0-9_\-+/=.])[A-Za-z0-9_\-+/=.]{40,}(?![A-Za-z0-9_\-+/=.])/g,
+];
+
+function looksHighEntropy(v) {
+  const mixed = /[a-z]/.test(v) && /[A-Z]/.test(v) && /[0-9]/.test(v);
+  if (!mixed) return false;
+  if (/[_+/=]/.test(v)) return true;
+  // JWT shape: exactly three base64url/64 segments joined by dots.
+  if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v)) return true;
+  return false;
+}
+
+function detectTokens(text) {
+  const out = [];
+  const generic = TOKEN_PATTERNS.length - 1;
+  for (let i = 0; i < TOKEN_PATTERNS.length; i++) {
+    const re = TOKEN_PATTERNS[i];
+    for (const m of scan(text, re)) {
+      if (i !== generic) {
+        out.push(m);
+        continue;
+      }
+      // Strip a leading `label=` so `token=SECRET` redacts the value, not
+      // the label: keep `token=***` readable instead of `***`.
+      let start = m.start;
+      let value = m.value;
+      const eq = value.indexOf('=');
+      if (eq > 0 && /^[A-Za-z_][A-Za-z0-9_]{0,19}$/.test(value.slice(0, eq))) {
+        start += eq + 1;
+        value = value.slice(eq + 1);
+      }
+      if (value.length < 40 || !looksHighEntropy(value)) continue;
+      out.push({ start, end: start + value.length, value });
+    }
+  }
+  return dedupeRanges(out);
+}
+
+// --- custom terms -----------------------------------------------------------
+// User-supplied word list, case-insensitive, whole-word (bounded by
+// non-word characters so "ac" does not hit inside "action").
+function detectCustomTerms(text, terms = []) {
+  const out = [];
+  for (const raw of terms ?? []) {
+    const term = String(raw).trim();
+    if (!term) continue;
+    const re = new RegExp(`(?<![A-Za-z0-9_])${escRe(term)}(?![A-Za-z0-9_])`, 'gi');
+    for (const m of scan(text, re)) out.push(m);
+  }
+  return dedupeRanges(out);
+}
+
+// --- aggregate --------------------------------------------------------------
+// Runs every detector and returns all matches (including overlapping ones,
+// which redact.js resolves longest-first). Deterministic order: by start,
+// then by end.
+function detect(text, options = {}) {
+  const src = String(text ?? '');
+  const all = [];
+  const add = (type, list) => {
+    for (const m of list) all.push({ start: m.start, end: m.end, value: m.value, type });
+  };
+  add('email', detectEmails(src));
+  add('phone', detectPhones(src));
+  add('ipv4', detectIPv4(src));
+  add('ipv6', detectIPv6(src));
+  add('credit_card', detectCreditCards(src));
+  add('iban', detectIbans(src));
+  add('url_cred', detectUrlsWithCredentials(src));
+  add('token', detectTokens(src));
+  add('custom', detectCustomTerms(src, options.customTerms));
+  const seen = new Set();
+  const out = [];
+  for (const m of all) {
+    const key = `${m.type}:${m.start}:${m.end}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(m);
+  }
+  out.sort((a, b) => a.start - b.start || a.end - b.end);
+  return out;
+}
+
+// ==== src/redact.js ====
+// Pure redaction orchestrator: detect -> resolve overlaps (longest first) ->
+// allocate stable aliases in document order -> apply policies -> splice.
+// No DOM, no I/O.
+
+
+function overlaps(a, b) {
+  return a.start < b.end && b.start < a.end;
+}
+
+// Greedy longest-first selection: matches sorted by length (ties: earlier
+// start first), each accepted only if it does not overlap an already accepted
+// match. `accepted` stays sorted by start, so the check only looks at the
+// two neighbours — any overlapping match must be one of them.
+function selectNonOverlapping(matches) {
+  const byLength = [...matches].sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start);
+  const accepted = [];
+  for (const m of byLength) {
+    let i = 0;
+    while (i < accepted.length && accepted[i].start < m.start) i++;
+    if (i > 0 && overlaps(accepted[i - 1], m)) continue;
+    if (i < accepted.length && overlaps(accepted[i], m)) continue;
+    accepted.splice(i, 0, m);
+  }
+  return accepted;
+}
+
+// Redact a plain text string.
+//
+// options:
+//   policies    { type: 'alias'|'mask_all'|'keep_last4'|'keep_domain' }
+//   customTerms [string, ...]
+//   aliases     pre-existing allocator (used by jsonredact so aliases stay
+//               consistent across every string in one document)
+//
+// returns {
+//   text,                 // redacted output
+//   matches,              // [{start, end, value, type, alias, policy, replacement}]
+//   counts,               // { type: number of replaced occurrences }
+//   aliases,              // the allocator used (entries() gives the mapping)
+// }
+function redact(text, options = {}) {
+  const src = String(text ?? '');
+  const policies = { ...DEFAULT_POLICIES, ...(options.policies ?? {}) };
+  const allocator = options.aliases ?? createAliasAllocator();
+
+  const detected = detect(src, { customTerms: options.customTerms });
+  const accepted = selectNonOverlapping(detected);
+
+  let out = '';
+  let cursor = 0;
+  const matches = [];
+  const counts = {};
+  for (const m of accepted) {
+    const alias = allocator.aliasFor(m.type, m.value);
+    const policy = policies[m.type] ?? 'mask_all';
+    const replacement = applyPolicy(policy, m.type, m.value, alias);
+    out += src.slice(cursor, m.start) + replacement;
+    matches.push({ ...m, alias, policy, replacement });
+    counts[m.type] = (counts[m.type] ?? 0) + 1;
+    cursor = m.end;
+  }
+  out += src.slice(cursor);
+
+  return { text: out, matches, counts, aliases: allocator };
+}
+
+// ==== src/jsonredact.js ====
+// Pure structural JSON redaction: parse -> walk strings -> redact -> rebuild.
+// Keys, arrays, numbers, booleans and null keep their shape; only string
+// VALUES are redacted. One shared alias allocator spans the whole document,
+// so the same value in two different fields gets the same alias.
+// No DOM, no I/O.
+
+
+function mergeCounts(target, src) {
+  for (const [k, v] of Object.entries(src)) {
+    target[k] = (target[k] ?? 0) + v;
+  }
+}
+
+// Redact any parsed-JSON value. Returns { value, counts, matches }.
+function redactJsonValue(value, options = {}) {
+  const allocator = options.aliases ?? createAliasAllocator();
+  const counts = {};
+  const matches = [];
+  const opts = { ...options, aliases: allocator };
+
+  const walk = (node) => {
+    if (typeof node === 'string') {
+      const r = redact(node, opts);
+      mergeCounts(counts, r.counts);
+      matches.push(...r.matches);
+      return r.text;
+    }
+    if (Array.isArray(node)) {
+      return node.map(walk);
+    }
+    if (node !== null && typeof node === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(node)) out[k] = walk(v);
+      return out;
+    }
+    return node;
+  };
+
+  return { value: walk(value), counts, matches };
+}
+
+// Parse a JSON text, redact it, and return pretty-printed output text.
+// Throws the normal JSON.parse error when the input is not valid JSON.
+function redactJsonText(text, options = {}) {
+  const parsed = JSON.parse(text);
+  const { value, counts, matches } = redactJsonValue(parsed, options);
+  return { text: JSON.stringify(value, null, 2), value, counts, matches };
+}
+
+// ==== src/app.js ====
+// DOM glue only. All redaction logic lives in the pure modules
+// (detectors/redact/jsonredact/policies/aliases) which are imported here and
+// are fully unit-tested under Node. This file touches the DOM and nothing else.
+
+
+const TYPE_DISPLAY = {
+  email: 'email',
+  phone: 'phone',
+  ipv4: 'ipv4',
+  ipv6: 'ipv6',
+  credit_card: 'credit card',
+  iban: 'iban',
+  url_cred: 'url + secrets',
+  token: 'token',
+  custom: 'custom terms',
+};
+
+const POLICY_HELP = {
+  alias: 'EMAIL_1 style alias',
+  mask_all: '***',
+  keep_last4: '•••• 4242',
+  keep_domain: 'j***@example.com',
+};
+
+// Synthetic demo text (RFC 2606 domains, 555 ranges) — embedded so the app
+// never needs a network request to show itself off.
+const SAMPLE_TEXT = `Support ticket #4821 - synthetic demo data
+
+Customer contact: john.doe+support@example.com
+Alternate: alice.smith@example.org
+Callback: +44 20 7123 4567 (US: (555) 123-4567)
+
+Card charged: 4111 1111 1111 1111
+Refund IBAN: GB82 WEST 1234 5698 7654 32
+
+Log: client_ip=192.168.10.42 edge=2001:db8::1
+POST https://user:pass@gateway.example.com/v1/pay?token=abc123secret456
+auth=ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8
+
+Follow-up from john.doe+support@example.com copied alice.smith@example.org.
+Year 2026, zip 90210 and order 1234567 must remain untouched.`;
+
+const els = {};
+const state = { mode: 'text', output: '', matches: [], counts: {}, error: null, view: 'highlight' };
+let debounceTimer = 0;
+
+function $(id) {
+  return document.getElementById(id);
+}
+
+function detectMode(text) {
+  const t = text.trim();
+  if (t.startsWith('{') || t.startsWith('[')) {
+    try {
+      JSON.parse(t);
+      return 'json';
+    } catch {
+      /* fall through to text mode */
+    }
+  }
+  return 'text';
+}
+
+function readPolicies() {
+  const policies = {};
+  for (const type of DETECTOR_TYPES) {
+    const sel = els.policySelects[type];
+    if (sel) policies[type] = sel.value;
+  }
+  return policies;
+}
+
+function readCustomTerms() {
+  return els.customTerms.value
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function run() {
+  const text = els.input.value;
+  state.mode = detectMode(text);
+  const opts = { policies: readPolicies(), customTerms: readCustomTerms() };
+  state.error = null;
+  try {
+    if (state.mode === 'json') {
+      const r = redactJsonText(text, opts);
+      state.output = r.text;
+      state.matches = r.matches;
+      state.counts = r.counts;
+    } else {
+      const r = redact(text, opts);
+      state.output = r.text;
+      state.matches = r.matches;
+      state.counts = r.counts;
+    }
+  } catch (err) {
+    state.error = String(err && err.message ? err.message : err);
+    state.output = '';
+    state.matches = [];
+    state.counts = {};
+  }
+  render();
+}
+
+function setStatus(msg) {
+  els.status.textContent = msg;
+}
+
+function renderModeNote() {
+  if (state.error) {
+    els.modeNote.textContent = `error: ${state.error}`;
+    els.modeNote.classList.add('is-error');
+    return;
+  }
+  els.modeNote.classList.remove('is-error');
+  if (!els.input.value) {
+    els.modeNote.textContent = 'Mode: waiting for input';
+    return;
+  }
+  els.modeNote.textContent =
+    state.mode === 'json'
+      ? 'Mode: JSON (structural walk — output is re-formatted with 2-space indent)'
+      : 'Mode: text (regex detection, in-place replacement)';
+}
+
+function renderCounts() {
+  els.counts.replaceChildren();
+  const order = DETECTOR_TYPES;
+  let shown = 0;
+  for (const type of order) {
+    const n = state.counts[type] ?? 0;
+    if (n === 0) continue;
+    shown++;
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.textContent = `${TYPE_DISPLAY[type]} ×${n}`;
+    els.counts.appendChild(chip);
+  }
+  if (shown === 0) {
+    const chip = document.createElement('span');
+    chip.className = 'chip chip-empty';
+    chip.textContent = els.input.value ? 'no sensitive values detected' : 'nothing to redact yet';
+    els.counts.appendChild(chip);
+  }
+}
+
+function renderHighlight() {
+  const frag = document.createDocumentFragment();
+  if (state.mode === 'json') {
+    // Match offsets are per-string in JSON mode, so inline marks cannot be
+    // placed in the raw document text; show the redacted output instead.
+    const pre = document.createElement('pre');
+    pre.className = 'output-pre';
+    pre.textContent = state.output;
+    frag.appendChild(pre);
+    return frag;
+  }
+  const text = els.input.value;
+  let cursor = 0;
+  for (const m of state.matches) {
+    frag.appendChild(document.createTextNode(text.slice(cursor, m.start)));
+    const mark = document.createElement('mark');
+    mark.textContent = m.replacement;
+    mark.title = `${TYPE_DISPLAY[m.type]}: ${m.value}`;
+    mark.className = `mk mk-${m.type.replace(/_/g, '-')}`;
+    frag.appendChild(mark);
+    cursor = m.end;
+  }
+  frag.appendChild(document.createTextNode(text.slice(cursor)));
+  return frag;
+}
+
+function renderDiff() {
+  const frag = document.createDocumentFragment();
+  if (state.matches.length === 0) {
+    const p = document.createElement('p');
+    p.className = 'muted';
+    p.textContent = 'No changes.';
+    frag.appendChild(p);
+    return frag;
+  }
+  const list = document.createElement('ol');
+  list.className = 'diff-list';
+  let i = 0;
+  for (const m of state.matches) {
+    i++;
+    const li = document.createElement('li');
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = TYPE_DISPLAY[m.type];
+    const oldSpan = document.createElement('s');
+    oldSpan.className = 'diff-old';
+    oldSpan.textContent = m.value;
+    const arrow = document.createElement('span');
+    arrow.className = 'diff-arrow';
+    arrow.textContent = ' → ';
+    const newSpan = document.createElement('span');
+    newSpan.className = 'diff-new';
+    newSpan.textContent = m.replacement;
+    const alias = document.createElement('span');
+    alias.className = 'diff-alias';
+    alias.textContent = m.policy === 'alias' ? '' : ` (${m.alias})`;
+    li.append(badge, oldSpan, arrow, newSpan, alias);
+    list.appendChild(li);
+  }
+  frag.appendChild(list);
+  return frag;
+}
+
+function renderPreview() {
+  els.preview.replaceChildren(state.view === 'diff' ? renderDiff() : renderHighlight());
+}
+
+function renderExport() {
+  const hasOutput = state.output.length > 0;
+  els.btnCopy.disabled = !hasOutput;
+  els.btnTxt.disabled = !hasOutput;
+  els.btnJson.disabled = !hasOutput || state.mode !== 'json';
+}
+
+function render() {
+  renderModeNote();
+  renderCounts();
+  renderPreview();
+  renderExport();
+}
+
+async function copyOutput() {
+  const text = state.output;
+  if (!text) return;
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      ok = document.execCommand('copy');
+    } catch {
+      ok = false;
+    }
+    ta.remove();
+  }
+  setStatus(ok ? `copied ${text.length} characters` : 'copy failed — select the preview manually');
+}
+
+function download(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function scheduleRun() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(run, 150);
+}
+
+async function loadFile(file) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    els.input.value = text;
+    els.fileName.textContent = `loaded: ${file.name} (${file.size} bytes)`;
+    run();
+    setStatus(`loaded ${file.name}`);
+  } catch (err) {
+    setStatus(`could not read file: ${err && err.message ? err.message : err}`);
+  }
+}
+
+function buildPolicyControls() {
+  for (const type of DETECTOR_TYPES) {
+    const row = document.createElement('label');
+    row.className = 'policy-row';
+    row.htmlFor = `policy-${type}`;
+    const name = document.createElement('span');
+    name.className = 'policy-name';
+    name.textContent = TYPE_DISPLAY[type];
+    const sel = document.createElement('select');
+    sel.id = `policy-${type}`;
+    for (const p of POLICIES) {
+      const opt = document.createElement('option');
+      opt.value = p;
+      opt.textContent = `${p} (${POLICY_HELP[p]})`;
+      sel.appendChild(opt);
+    }
+    sel.value = DEFAULT_POLICIES[type];
+    sel.addEventListener('change', run);
+    row.append(name, sel);
+    els.policyList.appendChild(row);
+    els.policySelects[type] = sel;
+  }
+}
+
+function init() {
+  els.input = $('input');
+  els.customTerms = $('custom-terms');
+  els.policyList = $('policy-list');
+  els.policySelects = {};
+  els.modeNote = $('mode-note');
+  els.counts = $('counts');
+  els.preview = $('preview');
+  els.status = $('status');
+  els.fileName = $('file-name');
+  els.btnCopy = $('btn-copy');
+  els.btnTxt = $('btn-txt');
+  els.btnJson = $('btn-json');
+  els.dropZone = $('drop-zone');
+  els.fileInput = $('file-input');
+
+  buildPolicyControls();
+
+  els.input.addEventListener('input', scheduleRun);
+  els.customTerms.addEventListener('input', scheduleRun);
+
+  $('btn-sample').addEventListener('click', () => {
+    els.input.value = SAMPLE_TEXT;
+    els.fileName.textContent = '';
+    run();
+    setStatus('loaded built-in sample');
+  });
+  $('btn-clear').addEventListener('click', () => {
+    els.input.value = '';
+    els.customTerms.value = '';
+    els.fileName.textContent = '';
+    setStatus('cleared');
+    run();
+  });
+
+  els.fileInput.addEventListener('change', () => loadFile(els.fileInput.files[0]));
+
+  els.dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    els.dropZone.classList.add('is-drag');
+  });
+  els.dropZone.addEventListener('dragleave', () => els.dropZone.classList.remove('is-drag'));
+  els.dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    els.dropZone.classList.remove('is-drag');
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) loadFile(file);
+  });
+
+  for (const radio of document.querySelectorAll('input[name="view"]')) {
+    radio.addEventListener('change', () => {
+      state.view = radio.value;
+      renderPreview();
+    });
+  }
+
+  els.btnCopy.addEventListener('click', copyOutput);
+  els.btnTxt.addEventListener('click', () => {
+    download('redacted.txt', state.output, 'text/plain;charset=utf-8');
+    setStatus('downloaded redacted.txt');
+  });
+  els.btnJson.addEventListener('click', () => {
+    download('redacted.json', state.output, 'application/json;charset=utf-8');
+    setStatus('downloaded redacted.json');
+  });
+
+  run();
+  document.documentElement.dataset.ready = '1';
+}
+
+init();
+</script>
+<!--INLINE-MODULE:END-->
+</body>
+</html>
